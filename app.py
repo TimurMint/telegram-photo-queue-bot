@@ -6,14 +6,16 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-# ================== НАСТРОЙКИ (берутся из Render Environment) ==================
-TOKEN       = os.getenv('TOKEN')
-CHANNEL_ID  = os.getenv('CHANNEL_ID')      # должно быть -1003619824382
-ADMIN_ID    = int(os.getenv('ADMIN_ID'))   # должно быть 613728374
-SECRET      = os.getenv('SECRET')          # например 123secrethasr
-# =============================================================================
+# ================== НАСТРОЙКИ ==================
+TOKEN      = os.getenv('TOKEN')
+CHANNEL_ID = os.getenv('CHANNEL_ID')
+ADMIN_ID   = int(os.getenv('ADMIN_ID'))
+SECRET     = os.getenv('SECRET')
+# ==============================================
 
-bot = telebot.TeleBot(TOKEN)
+# ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
+bot = telebot.TeleBot(TOKEN, threaded=False, skip_pending=True)
+# ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
 
 def init_db():
     conn = sqlite3.connect('queue.db')
@@ -35,6 +37,11 @@ def get_pending_count():
     conn.close()
     return count
 
+# ====================== ТЕСТОВАЯ КОМАНДА ======================
+@bot.message_handler(commands=['start'])
+def start(message):
+    bot.reply_to(message, "✅ Бот запущен и готов!\nКидай фото — они пойдут в очередь.")
+
 # ====================== ПРИЁМ ФОТО ======================
 @bot.message_handler(content_types=['photo'])
 def handle_photo(message):
@@ -53,7 +60,7 @@ def handle_photo(message):
 
     bot.reply_to(message, f"✅ Фото добавлено в очередь!\nОсталось: {get_pending_count()}")
 
-# ====================== КОМАНДЫ ======================
+# ====================== КОМАНДА /queue ======================
 @bot.message_handler(commands=['queue'])
 def show_queue(message):
     if message.chat.id != ADMIN_ID: return
@@ -63,28 +70,28 @@ def show_queue(message):
     if not rows:
         bot.reply_to(message, "Очередь пуста")
         return
-    text = "📋 В очереди:\n" + "\n".join([f"#{r[0]} — {r[2][:10]} — { (r[1] or 'без подписи')[:50]}" for r in rows])
+    text = "📋 В очереди:\n" + "\n".join([f"#{r[0]} — {r[2][:10]} — {(r[1] or 'без подписи')[:50]}" for r in rows])
     bot.reply_to(message, text)
 
-# ====================== ВЕБХУК ======================
+# ====================== ВЕБХУК (исправленный) ======================
 @app.route(f'/{SECRET}', methods=['POST'])
 def webhook():
-    json_str = request.stream.read().decode('utf-8')
-    update = telebot.types.Update.de_json(json_str)
-    bot.process_new_updates([update])
-    return 'OK', 200
+    try:
+        update = telebot.types.Update.de_json(request.get_json(force=True))
+        bot.process_new_updates([update])
+        return 'OK', 200
+    except Exception as e:
+        print("Webhook error:", e)   # видно в логах Render
+        return 'OK', 200
 
-# ====================== ТРИГГЕР ОТПРАВКИ (для cron) ======================
+# ====================== ТРИГГЕР ОТПРАВКИ ======================
 @app.route('/send-now')
 def send_photos():
     if request.args.get('secret') != SECRET:
         return 'Access denied', 403
-
+    # ... (тот же код отправки, что был раньше)
     conn = sqlite3.connect('queue.db')
-    photos = conn.execute(
-        "SELECT id, file_id, caption FROM queue WHERE sent=0 ORDER BY id LIMIT 3"
-    ).fetchall()
-
+    photos = conn.execute("SELECT id, file_id, caption FROM queue WHERE sent=0 ORDER BY id LIMIT 3").fetchall()
     sent_count = 0
     for pid, file_id, caption in photos:
         try:
@@ -93,10 +100,9 @@ def send_photos():
             sent_count += 1
         except Exception as e:
             print(f"Ошибка отправки #{pid}: {e}")
-
     conn.commit()
     conn.close()
-    return f'✅ Отправлено {sent_count} фото сегодня!', 200
+    return f'✅ Отправлено {sent_count} фото!', 200
 
 # ====================== УСТАНОВКА ВЕБХУКА ======================
 @app.route('/setwebhook')
@@ -106,8 +112,12 @@ def setup_webhook():
     webhook_url = f"https://{request.host}/{SECRET}"
     bot.remove_webhook()
     bot.set_webhook(url=webhook_url)
-    return f'✅ Webhook установлен: {webhook_url}'
+    return f'✅ Webhook установлен!\nURL: {webhook_url}'
 
-# Запуск (для Render не используется, но оставляем)
+# ====================== СТАТУС ======================
+@app.route('/')
+def home():
+    return "Бот работает! Открой /setwebhook?key=твой_SECRET"
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
