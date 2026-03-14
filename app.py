@@ -6,12 +6,12 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-# ================== НАСТРОЙКИ (берутся из Render) ==================
-TOKEN = os.getenv('8721130396:AAEhbvR-WpRrVMAMGiWxECjIx0iIQTqQVNE')
-CHANNEL_ID = os.getenv('-1003619824382')      # @channel или -1001234567890
-ADMIN_ID = int(os.getenv('613728374'))     # твой Telegram ID
-SECRET = os.getenv('123secrethasr')              # любой длинный пароль, например supersecret12345
-# =================================================================
+# ================== НАСТРОЙКИ (берутся из Render Environment) ==================
+TOKEN       = os.getenv('TOKEN')
+CHANNEL_ID  = os.getenv('CHANNEL_ID')      # должно быть -1003619824382
+ADMIN_ID    = int(os.getenv('ADMIN_ID'))   # должно быть 613728374
+SECRET      = os.getenv('SECRET')          # например 123secrethasr
+# =============================================================================
 
 bot = telebot.TeleBot(TOKEN)
 
