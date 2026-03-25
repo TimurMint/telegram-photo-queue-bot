@@ -64,12 +64,12 @@ def get_pending_count():
 def start(message):
     if message.chat.id not in ADMIN_IDS:
         return
-    bot.reply_to(message, "✅ Бот готов!\n\n"
+    bot.reply_to(message, "Функции бота:\n\n"
                           "Команды:\n"
                           "/settings — изменить количество фото за раз\n"
                           "/queue — посмотреть очередь\n"
                           "/sendone — отправить одно фото сейчас\n"
-                          "/delete [N] — удалить последние N фото\n"
+                          "/delete [число] — удалить последние N фото\n"
                           "/delete — очистить всю очередь")
 
 @bot.message_handler(content_types=['photo'])
@@ -87,7 +87,7 @@ def handle_photo(message):
     conn.commit()
     conn.close()
 
-    bot.reply_to(message, f"✅ Фото добавлено в очередь!\nОсталось: {get_pending_count()}")
+    bot.reply_to(message, f"Фото добавлено в очередь\nОсталось: {get_pending_count()}")
 
 @bot.message_handler(commands=['queue'])
 def show_queue(message):
@@ -115,7 +115,7 @@ def send_one_now(message):
         bot.send_photo(CHANNEL_ID, file_id, caption=caption or None)
         conn.execute("UPDATE queue SET sent=1 WHERE id=?", (pid,))
         conn.commit()
-        bot.reply_to(message, f"✅ Отправлено фото #{pid} прямо сейчас!")
+        bot.reply_to(message, f"Отправлено фото #{pid}")
     except Exception as e:
         bot.reply_to(message, f"Ошибка: {e}")
     conn.close()
@@ -128,7 +128,7 @@ def delete_queue(message):
     if len(args) == 1:
         conn.execute("DELETE FROM queue WHERE sent=0")
         conn.commit()
-        bot.reply_to(message, "✅ Вся очередь очищена!")
+        bot.reply_to(message, "Вся очередь очищена!")
     else:
         try:
             n = int(args[1])
@@ -139,7 +139,7 @@ def delete_queue(message):
                 placeholders = ','.join('?' * len(ids))
                 conn.execute(f"DELETE FROM queue WHERE id IN ({placeholders})", ids)
                 conn.commit()
-                bot.reply_to(message, f"✅ Удалено {len(ids)} последних фото")
+                bot.reply_to(message, f"Удалено {len(ids)} последних фото")
             else:
                 bot.reply_to(message, "Нечего удалять")
         except:
@@ -166,7 +166,7 @@ def callback_handler(call):
     if call.data.startswith("set_"):
         num = int(call.data.split("_")[1])
         set_setting('batch_size', num)
-        bot.edit_message_text(f"✅ Установлено: {num} фото за один запуск", 
+        bot.edit_message_text(f"Установлено: {num} фото за один запуск", 
                               call.message.chat.id, call.message.message_id)
 
 # ====================== ОТПРАВКА ПО РАСПИСАНИЮ ======================
