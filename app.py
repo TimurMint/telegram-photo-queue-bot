@@ -3,13 +3,16 @@ from flask import Flask, request
 import sqlite3
 import os
 from datetime import datetime
+import threading
 
 app = Flask(__name__)
 
-TOKEN = os.getenv('TOKEN')
-CHANNEL_ID = os.getenv('CHANNEL_ID')          # основной канал (можно менять в Render)
-ADMIN_ID = int(os.getenv('ADMIN_ID'))
-SECRET = os.getenv('SECRET')
+# ================== НАСТРОЙКИ ==================
+TOKEN      = os.getenv('TOKEN')
+CHANNEL_ID = os.getenv('CHANNEL_ID')
+ADMIN_ID   = int(os.getenv('ADMIN_ID'))
+SECRET     = os.getenv('SECRET')
+# ==============================================
 
 bot = telebot.TeleBot(TOKEN, threaded=False, skip_pending=True)
 
@@ -32,7 +35,7 @@ def init_db():
 
 init_db()
 
-def get_setting(key, default=None):
+def get_setting(key, default="3"):
     conn = sqlite3.connect('queue.db')
     c = conn.cursor()
     c.execute("SELECT value FROM settings WHERE key=?", (key,))
@@ -43,22 +46,30 @@ def get_setting(key, default=None):
 def set_setting(key, value):
     conn = sqlite3.connect('queue.db')
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
     conn.commit()
     conn.close()
 
-# Кол-во фото за раз (по умолчанию 3)
 def get_batch_size():
     return int(get_setting('batch_size', '3'))
 
-# ====================== /start ======================
+def get_pending_count():
+    conn = sqlite3.connect('queue.db')
+    count = conn.execute("SELECT COUNT(*) FROM queue WHERE sent=0").fetchone()[0]
+    conn.close()
+    return count
+
+# ====================== КОМАНДЫ ======================
 @bot.message_handler(commands=['start'])
 def start(message):
-    if message.chat.id != ADMIN_ID:
-        return
-    bot.reply_to(message, "Бот готов! Кидай фото.\n\n/settings — настройки\n/queue — очередь\n/delete [n] — удалить последние n или все")
+    if message.chat.id != ADMIN_ID: return
+    bot.reply_to(message, "✅ Бот запущен!\n\nКоманды:\n"
+                          "/settings — изменить настройки\n"
+                          "/queue — посмотреть очередь\n"
+                          "/sendone — отправить одно фото сейчас\n"
+                          "/delete [число] — удалить последние N фото\n"
+                          "/delete — очистить всю очередь")
 
-# ====================== Приём фото ======================
 @bot.message_handler(content_types=['photo'])
 def handle_photo(message):
     if message.chat.id != ADMIN_ID:
@@ -71,9 +82,8 @@ def handle_photo(message):
                  (file_id, caption, datetime.now().isoformat()))
     conn.commit()
     conn.close()
-    bot.reply_to(message, f"✅ Добавлено! Осталось: {get_pending_count()}")
+    bot.reply_to(message, f"✅ Фото добавлено в очередь!\nОсталось: {get_pending_count()}")
 
-# ====================== /queue ======================
 @bot.message_handler(commands=['queue'])
 def show_queue(message):
     if message.chat.id != ADMIN_ID: return
@@ -86,95 +96,92 @@ def show_queue(message):
     text = "📋 Очередь:\n" + "\n".join([f"#{r[0]} | {r[2][:10]} | {(r[1] or 'без подписи')[:60]}" for r in rows])
     bot.reply_to(message, text)
 
-# ====================== /delete [n] ======================
+@bot.message_handler(commands=['sendone'])
+def send_one_now(message):
+    if message.chat.id != ADMIN_ID: return
+    conn = sqlite3.connect('queue.db')
+    photo = conn.execute("SELECT id, file_id, caption FROM queue WHERE sent=0 ORDER BY id LIMIT 1").fetchone()
+    if not photo:
+        bot.reply_to(message, "Очередь пустая")
+        conn.close()
+        return
+    pid, file_id, caption = photo
+    try:
+        bot.send_photo(CHANNEL_ID, file_id, caption=caption or None)
+        conn.execute("UPDATE queue SET sent=1 WHERE id=?", (pid,))
+        conn.commit()
+        bot.reply_to(message, f"✅ Отправлено фото #{pid} прямо сейчас!")
+    except Exception as e:
+        bot.reply_to(message, f"Ошибка: {e}")
+    conn.close()
+
 @bot.message_handler(commands=['delete'])
 def delete_queue(message):
     if message.chat.id != ADMIN_ID: return
-
     args = message.text.split()
+    conn = sqlite3.connect('queue.db')
     if len(args) == 1:
-        # Удалить все
-        conn = sqlite3.connect('queue.db')
         conn.execute("DELETE FROM queue WHERE sent=0")
         conn.commit()
-        conn.close()
-        bot.reply_to(message, "Вся очередь очищена!")
-        return
-
-    try:
-        n = int(args[1])
-        if n < 1:
-            bot.reply_to(message, "Укажи положительное число")
-            return
-    except:
-        bot.reply_to(message, "Формат: /delete [число] или просто /delete для всей очереди")
-        return
-
-    conn = sqlite3.connect('queue.db')
-    # Последние n = самые новые (ORDER BY id DESC LIMIT n)
-    to_delete = conn.execute(
-        "SELECT id FROM queue WHERE sent=0 ORDER BY id DESC LIMIT ?",
-        (n,)
-    ).fetchall()
-
-    if not to_delete:
-        bot.reply_to(message, "Нечего удалять")
-        conn.close()
-        return
-
-    ids = [row[0] for row in to_delete]
-    placeholders = ','.join('?' for _ in ids)
-    conn.execute(f"DELETE FROM queue WHERE id IN ({placeholders})", ids)
-    conn.commit()
+        bot.reply_to(message, "✅ Вся очередь очищена!")
+    else:
+        try:
+            n = int(args[1])
+            ids = [row[0] for row in conn.execute("SELECT id FROM queue WHERE sent=0 ORDER BY id DESC LIMIT ?", (n,)).fetchall()]
+            if ids:
+                placeholders = ','.join('?' * len(ids))
+                conn.execute(f"DELETE FROM queue WHERE id IN ({placeholders})", ids)
+                conn.commit()
+                bot.reply_to(message, f"✅ Удалено {len(ids)} последних фото")
+            else:
+                bot.reply_to(message, "Нечего удалять")
+        except:
+            bot.reply_to(message, "Формат: /delete или /delete 5")
     conn.close()
 
-    bot.reply_to(message, f"Удалено {len(ids)} последних фото из очереди")
-
-# ====================== /settings ======================
 @bot.message_handler(commands=['settings'])
 def settings_menu(message):
     if message.chat.id != ADMIN_ID: return
-
-    markup = telebot.types.InlineKeyboardMarkup(row_width=2)
-    current_batch = get_batch_size()
-    markup.add(
-        telebot.types.InlineKeyboardButton(f"Фото за раз: {current_batch}", callback_data="dummy"),
-        telebot.types.InlineKeyboardButton("Изменить кол-во", callback_data="change_batch")
-    )
-    # Если хочешь добавить выбор канала позже — здесь будет кнопка
-    # markup.add(telebot.types.InlineKeyboardButton("Выбрать канал", callback_data="change_channel"))
-
-    bot.reply_to(message, "Настройки бота:", reply_markup=markup)
+    markup = telebot.types.InlineKeyboardMarkup()
+    markup.add(telebot.types.InlineKeyboardButton(f"📸 Фото за раз: {get_batch_size()}", callback_data="dummy"))
+    markup.add(telebot.types.InlineKeyboardButton("Изменить количество", callback_data="change_batch"))
+    bot.reply_to(message, "⚙️ Настройки бота:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: True)
-def callback_settings(call):
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "Доступ запрещён")
-        return
-
+def callback_handler(call):
+    if call.from_user.id != ADMIN_ID: return
     if call.data == "change_batch":
         markup = telebot.types.InlineKeyboardMarkup(row_width=5)
         for i in range(1, 21):
-            markup.add(telebot.types.InlineKeyboardButton(str(i), callback_data=f"set_batch_{i}"))
-        bot.edit_message_text("Выбери количество фото за один запуск (1–20):", call.message.chat.id, call.message.message_id, reply_markup=markup)
+            markup.add(telebot.types.InlineKeyboardButton(str(i), callback_data=f"set_{i}"))
+        bot.edit_message_text("Выберите сколько фото отправлять за один раз (1–20):", 
+                              call.message.chat.id, call.message.message_id, reply_markup=markup)
+    elif call.data.startswith("set_"):
+        num = int(call.data.split("_")[1])
+        set_setting('batch_size', num)
+        bot.edit_message_text(f"✅ Установлено: {num} фото за раз", call.message.chat.id, call.message.message_id)
 
-    elif call.data.startswith("set_batch_"):
-        num = int(call.data.split("_")[2])
-        set_setting('batch_size', str(num))
-        bot.edit_message_text(f"Установлено: {num} фото за раз", call.message.chat.id, call.message.message_id)
-        bot.answer_callback_query(call.id, f"Сохранено: {num}")
+# ====================== ВЕБХУК ======================
+@app.route(f'/{SECRET}', methods=['POST'])
+def webhook():
+    try:
+        update = telebot.types.Update.de_json(request.get_json(force=True))
+        bot.process_new_updates([update])
+        return 'OK', 200
+    except Exception as e:
+        print("Webhook error:", e)
+        return 'OK', 200
 
-# ====================== Отправка (теперь использует настройку) ======================
+# ====================== ОТПРАВКА ПО CRON ======================
 @app.route('/send-now')
 def send_photos():
     if request.args.get('secret') != SECRET:
         return 'Access denied', 403
 
-    batch_size = get_batch_size()
-
+    batch = get_batch_size()
     conn = sqlite3.connect('queue.db')
     photos = conn.execute(
-        f"SELECT id, file_id, caption FROM queue WHERE sent=0 ORDER BY id LIMIT {batch_size}"
+        "SELECT id, file_id, caption FROM queue WHERE sent=0 ORDER BY id LIMIT ?", (batch,)
     ).fetchall()
 
     sent_count = 0
@@ -184,13 +191,29 @@ def send_photos():
             conn.execute("UPDATE queue SET sent=1 WHERE id=?", (pid,))
             sent_count += 1
         except Exception as e:
-            print(f"Ошибка отправки #{pid}: {e}")
-
+            print(f"Ошибка #{pid}: {e}")
     conn.commit()
     conn.close()
     return f'Отправлено {sent_count} фото', 200
 
-# ... остальной код (webhook, setwebhook, home, ping если был) остаётся без изменений ...
+# ====================== PING ======================
+@app.route('/ping')
+def ping():
+    return 'Pong', 200
+
+# ====================== УСТАНОВКА ВЕБХУКА ======================
+@app.route('/setwebhook')
+def setup_webhook():
+    if request.args.get('key') != SECRET:
+        return 'Wrong key', 403
+    url = f"https://{request.host}/{SECRET}"
+    bot.remove_webhook()
+    bot.set_webhook(url=url)
+    return f'✅ Webhook установлен!\nURL: {url}'
+
+@app.route('/')
+def home():
+    return "Бот работает ✅"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
